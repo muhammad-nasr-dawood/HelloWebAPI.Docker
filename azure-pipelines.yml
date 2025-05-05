@@ -1,0 +1,116 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Trigger the pipeline only on merges to the master branch
+trigger:
+  branches:
+    include:
+      - master
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Define the agent pool to run the pipeline
+pool:
+  name: 'Default'  # Replace with your own agent pool if needed
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Define common variables used across stages
+variables:
+  buildConfiguration: 'Release'   # Set build configuration
+  dotnetVersion:    '8.0.x'       # Set desired .NET SDK version
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Stage 1: Install .NET SDK
+- stage: InstallSDK
+  displayName: '🛠 Install .NET SDK'
+  jobs:
+    - job: Install
+      displayName: 'Install .NET $(dotnetVersion)'
+      steps:
+        - task: UseDotNet@2
+          displayName: 'Install .NET SDK $(dotnetVersion)'
+          inputs:
+            packageType: 'sdk'
+            version: '$(dotnetVersion)'
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Stage 2: Restore NuGet Dependencies
+- stage: Restore
+  displayName: '🔄 Restore Dependencies'
+  dependsOn: InstallSDK
+  jobs:
+    - job: Restore
+      displayName: 'Restore'
+      steps:
+        - task: DotNetCoreCLI@2
+          displayName: 'dotnet restore'
+          inputs:
+            command: 'restore'
+            projects: '**/*.csproj'
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Stage 3: Build the Solution
+- stage: Build
+  displayName: '📦 Build Solution'
+  dependsOn: Restore
+  jobs:
+    - job: Build
+      displayName: 'Build'
+      steps:
+        - task: DotNetCoreCLI@2
+          displayName: 'dotnet build'
+          inputs:
+            command: 'build'
+            projects: 'HelloWebAPI.sln'
+            arguments: '--configuration $(buildConfiguration)'
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Stage 4: Run Unit Tests
+- stage: Test
+  displayName: '🧪 Run Unit Tests'
+  dependsOn: Build
+  jobs:
+    - job: Test
+      displayName: 'Test'
+      steps:
+        - task: DotNetCoreCLI@2
+          displayName: 'dotnet test'
+          inputs:
+            command: 'test'
+            projects: '**/*.tests.csproj'
+            arguments: '--configuration $(buildConfiguration)'
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Stage 5: Build and Test Docker Image
+- stage: Docker
+  displayName: '🐳 Build Docker Image'
+  dependsOn: Test
+  condition: succeeded()  # Run this stage only if tests pass
+  jobs:
+    - job: DockerBuild
+      displayName: 'Docker Build'
+      steps:
+        # Step 1: Build the Docker image using the Dockerfile
+        - script: |
+            echo "🐳 Building Docker image 'hellowebapi:$(Build.BuildId)'..."
+            docker build \
+              -t hellowebapi:$(Build.BuildId) \
+              -f HelloWebAPI/Dockerfile \
+              HelloWebAPI
+          displayName: 'docker build'
+
+        # Step 2: Run the container and smoke test it
+        - script: |
+            echo "🚀 Starting container..."
+            docker run -d -p 8080:80 --name hellotest hellowebapi:$(Build.BuildId)
+
+            echo "⏳ Waiting..."
+            sleep 5
+
+            echo "🔍 Testing endpoint..."
+            if curl --fail http://localhost:8080/api/hello; then
+              echo "✅ Test passed. Leaving container running."
+            else
+              echo "❌ Test failed. Stopping container."
+              docker stop hellotest
+              docker rm hellotest
+              exit 1
+            fi
+          displayName: 'Run and Test Container'
